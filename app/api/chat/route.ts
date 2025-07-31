@@ -1,8 +1,21 @@
-// lifo-app/app/api/chat/route.ts (수정된 부분)
-
+// lifo-app/app/api/chat/route.ts
 import OpenAI from 'openai';
 import { NextResponse } from 'next/server';
 import { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+// Firebase Admin SDK 임포트 및 초기화 (서버에서만 실행되므로 안전)
+import admin from 'firebase-admin';
+import { getApp } from 'firebase-admin/app'; // getApp 추가
+import { getFirestore } from 'firebase-admin/firestore'; // getFirestore 추가
+
+// Firebase Admin SDK 초기화 (단 한 번만 실행되도록)
+// Vercel 환경에서 서비스 계정 키를 환경 변수로 설정합니다.
+// NEXT_PUBLIC_ 접두사 없음: 이 값은 서버에서만 사용됩니다.
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}')),
+  });
+}
+const dbAdmin = getFirestore(getApp()); // Admin SDK용 Firestore 인스턴스
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY, 
@@ -10,27 +23,70 @@ const openai = new OpenAI({
 
 export async function POST(request: Request) {
   try {
-    const { currentMessage, previousConversations, promptType } = await request.json();
+    const { 
+      currentMessage, 
+      previousConversations, 
+      promptType, 
+      userId // <-- userId를 클라이언트에서 전달받도록 변경 (보안 유의)
+    } = await request.json();
+
+    if (!userId) { // userId 유효성 검사 추가
+      return NextResponse.json({ error: "User ID is missing" }, { status: 400 });
+    }
 
     if (!currentMessage && promptType !== 'summary') {
       return NextResponse.json({ error: "No message provided" }, { status: 400 });
     }
 
     let messagesToSend: ChatCompletionMessageParam[] = [];
-
-    // 대화 턴 수 계산 (이 변수는 이제 AI에게 직접 전달하지 않습니다. 백엔드에서만 사용)
     const conversationTurnCount = previousConversations.length; 
-    const suggestSummaryThreshold = 3; // 요약 제안 기준은 백엔드에서만 사용
+    const suggestSummaryThreshold = 3; 
+
+    // ----------------------------------------------------
+    // 사용자 개인 프로필 불러오기
+    // ----------------------------------------------------
+    let userProfile = null;
+    try {
+        const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile'); // Firestore 경로에 app ID 포함
+        const doc = await userProfileRef.get();
+        if (doc.exists) {
+            userProfile = doc.data();
+            console.log("User profile loaded:", userProfile);
+        } else {
+            console.log("No existing user profile found.");
+        }
+    } catch (profileError) {
+        console.error("Failed to load user profile:", profileError);
+        // 프로필 로딩 실패는 치명적이지 않으므로 앱을 중단하지 않습니다.
+    }
+
 
     // ----------------------------------------------------
     // 시스템 메시지 및 대화 메시지 구성 로직
     // ----------------------------------------------------
     if (promptType === 'interview') {
-      const systemMessageContent = `
+      let systemMessageContent = `
         당신은 '라이포(Lifo)'라는 이름의 AI 대화 파트너입니다.
         당신의 핵심 목적은 사용자가 겪고 있는 감정이나 상황에 대해 깊이 경청하고, 진심으로 공감하며,
         그들의 기분이 나아지고 긍정적인 방향으로 스스로 나아갈 수 있도록 따뜻하게 돕는 것입니다.
 
+        `;
+        
+        // 개인화된 정보 추가
+        if (userProfile && userProfile.frequent_emotions && userProfile.frequent_emotions.length > 0) {
+            systemMessageContent += `
+            **[사용자 개인 맞춤 정보]:**
+            사용자는 과거 대화에서 주로 다음과 같은 감정들을 표현했습니다: ${userProfile.frequent_emotions.join(', ')}.
+            이 정보를 바탕으로 사용자의 감정 상태와 가치관을 더 깊이 이해하고 대화에 반영해주세요.
+            `;
+        }
+        if (userProfile && userProfile.last_summary) {
+            systemMessageContent += `
+            최근의 자기서사 요약: ${userProfile.last_summary}.
+            `;
+        }
+
+        systemMessageContent += `
         다음 지침을 반드시 따르세요:
         1.  **깊은 경청과 정확한 공감:** 사용자의 말을 끊지 않고 끝까지 경청하며, 그들의 감정을 정확히 이해했음을 보여주는 공감적인 언어를 사용하세요. "그랬군요", "힘드셨겠네요", "어떤 마음인지 알 것 같아요" 등의 표현을 활용하세요. **단어 하나하나의 의미를 세심하게 파악하여 오해 없이 반응해야 합니다.**
         2.  **비판 및 판단 금지:** 사용자의 경험이나 감정에 대해 절대 비판하거나 판단하지 마세요. 모든 감정과 경험은 존중받아야 합니다.
@@ -54,7 +110,6 @@ export async function POST(request: Request) {
       ];
 
     } else if (promptType === 'summary') {
-      // '자기서사 요약'용 시스템 프롬프트 (변경 없음)
       const systemMessageContent = `
         당신은 사용자와의 대화 내용을 바탕으로 사용자의 핵심 감정, 가치, 그리고 하루 동안의 중요한 행동 패턴을 포착하여 간결하고 통찰력 있는 '자기서사' 문장을 생성하는 전문가입니다. 문장은 2문장 이내로 요약하고, 긍정적이고 성장 지향적인 톤을 유지해야 합니다. 답변은 자기서사 문장만 포함합니다.
       `.trim();
@@ -100,13 +155,80 @@ export async function POST(request: Request) {
     // -----------------------------------------------------------------------------------
     let finalAiResponse = aiResponse;
     if (promptType === 'interview' && conversationTurnCount >= suggestSummaryThreshold) {
-      // AI 답변의 끝에 요약 제안 문구를 추가합니다.
-      // AI가 질문으로 끝난다는 지침을 잘 따른다면, 질문 뒤에 자연스럽게 붙습니다.
       finalAiResponse += "\n\n(참고: 혹시 지금 나눈 이야기들을 제가 한번 정리해 드릴까요? 필요하시면 아래 '오늘의 자기서사 요약하기' 버튼을 눌러주세요.)";
     }
 
-    return NextResponse.json({ aiResponse: finalAiResponse }); // 변경된 부분
     // -----------------------------------------------------------------------------------
+    // 감정/가치 키워드 추출 및 프로필 업데이트 로직 추가 (interview 모드일 때만)
+    // -----------------------------------------------------------------------------------
+    if (promptType === 'interview' && userId) {
+        try {
+            // 별도의 AI 요청을 통해 감정 키워드 추출
+            const emotionExtractionPrompt: ChatCompletionMessageParam[] = [
+                {
+                    role: 'system',
+                    content: `다음 대화 내용에서 사용자의 핵심 감정 키워드(최대 3개, 명사형)와 연관된 핵심 가치(최대 2개, 명사형)를 추출하고, 오늘 대화의 전체적인 톤을 긍정/부정/중립 중 하나로 분류하여 JSON 형식으로만 응답해주세요. 감정이나 가치가 명확하지 않으면 빈 배열로 두세요.
+                    예시: {"emotions": ["스트레스", "피로"], "values": ["완벽함"], "tone": "부정"}
+                    `
+                },
+                ...previousConversations.flatMap((conv: { user_message: string; ai_response: string; }) => [
+                    { role: 'user', content: conv.user_message },
+                    { role: 'assistant', content: conv.ai_response }
+                ]),
+                { role: 'user', content: `사용자의 마지막 메시지: "${currentMessage}" AI의 마지막 응답: "${finalAiResponse}"\n이 대화에서 감정과 가치를 추출해주세요.` }
+            ];
+
+            const emotionCompletion = await openai.chat.completions.create({
+                model: "gpt-3.5-turbo", // 감정 추출은 가벼운 모델 사용 가능
+                messages: emotionExtractionPrompt,
+                temperature: 0.2, // 창의성 낮춰서 정확도 높임
+                max_tokens: 150,
+                response_format: { type: "json_object" } // JSON 형식 응답 요청
+            });
+
+            const emotionDataString = emotionCompletion.choices[0].message?.content;
+            if (emotionDataString) {
+                try {
+                    const parsedEmotionData = JSON.parse(emotionDataString);
+                    const { emotions = [], values = [], tone = '중립' } = parsedEmotionData;
+
+                    // Firestore 사용자 프로필 업데이트
+                    const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile');
+                    await userProfileRef.set({
+                        frequent_emotions: admin.firestore.FieldValue.arrayUnion(...emotions), // 기존 배열에 추가 (중복 허용)
+                        frequent_values: admin.firestore.FieldValue.arrayUnion(...values),
+                        last_updated: admin.firestore.FieldValue.serverTimestamp(),
+                        // 필요에 따라 tone이나 다른 통계 데이터도 업데이트 가능
+                    }, { merge: true }); // 기존 필드는 유지하고 새 필드만 추가/업데이트
+
+                    console.log("User profile updated with emotions and values:", { emotions, values, tone });
+
+                } catch (jsonError) {
+                    console.error("Failed to parse emotion data JSON:", jsonError);
+                }
+            }
+        } catch (emotionExtractionError) {
+            console.error("Failed to extract emotions or update profile:", emotionExtractionError);
+        }
+    }
+    // -----------------------------------------------------------------------------------
+    // 자기서사 요약 모드일 때 마지막 요약 저장
+    if (promptType === 'summary' && userId && finalAiResponse) {
+        try {
+            const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile');
+            await userProfileRef.set({
+                last_summary: finalAiResponse,
+                last_updated: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            console.log("User profile updated with last summary.");
+        } catch (summarySaveError) {
+            console.error("Failed to save last summary to profile:", summarySaveError);
+        }
+    }
+    // -----------------------------------------------------------------------------------
+
+
+    return NextResponse.json({ aiResponse: finalAiResponse });
 
   } catch (error: unknown) {
     console.error("API Route 오류: OpenAI API 호출 중:", error);

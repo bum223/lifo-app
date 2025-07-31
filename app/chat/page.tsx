@@ -197,7 +197,8 @@ export default function ChatPage() {
         body: JSON.stringify({ 
           currentMessage: userMessage, 
           previousConversations: previousMessagesForAI,
-          promptType: 'interview' // <-- promptType을 'interview'로 명확히 지정
+          promptType: 'interview', // <-- promptType을 'interview'로 명확히 지정
+          userId: currentUser.uid // <-- 이 줄 추가
         }),
       });
 
@@ -263,7 +264,8 @@ export default function ChatPage() {
         body: JSON.stringify({
           currentMessage: "", // 요약 요청 프롬프트는 API Route에서 직접 구성되므로 여기서는 비워둡니다.
           previousConversations: allConversationsForSummary,
-          promptType: 'summary' // <-- promptType을 'summary'로 명확히 지정
+          promptType: 'summary', // <-- promptType을 'summary'로 명확히 지정
+          userId: currentUser.uid // <-- 이 줄 추가
         }),
       });
 
