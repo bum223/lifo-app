@@ -1,0 +1,44 @@
+// tsconfig.json
+// TypeScript 프로젝트의 컴파일러 옵션과 파일 구성을 정의합니다.
+{
+  "compilerOptions": {
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler", // Next.js 13+ App Router에서 권장되는 모듈 해석 방식
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./*" // '@/' 별칭을 사용하여 프로젝트 루트 디렉토리를 가리킵니다.
+      ]
+    },
+    "baseUrl": "." // 모듈 해석을 위한 기준 디렉토리를 프로젝트 루트로 설정합니다.
+    ,
+    "target": "ES2017"
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
