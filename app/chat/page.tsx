@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { auth, db } from "@/lib/firebase";
+import { auth, db, app } from "@/lib/firebase"; // <-- 'app' 인스턴스도 임포트합니다.
 import { 
   collection, 
   query, 
@@ -36,8 +36,13 @@ export default function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+  // Canvas 환경 특정 변수 제거 및 Firebase 앱 ID 직접 사용
+  // const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // 제거
+  // const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null; // 제거
+
+  // Firebase 앱 인스턴스에서 직접 app.options.appId를 가져옵니다.
+  // 이 값은 lib/firebase.ts에서 NEXT_PUBLIC_FIREBASE_APP_ID 환경 변수로 설정됩니다.
+  const firebaseAppId = app.options.appId; 
 
   useEffect(() => {
     console.log("ChatPage useEffect: Setting up auth and firestore...");
@@ -46,9 +51,9 @@ export default function ChatPage() {
       setLoading(true);
       setError(null);
 
-      if (!auth || !db) {
-        console.error("Firebase 인스턴스가 유효하지 않습니다. auth:", auth, "db:", db);
-        setError("Firebase가 초기화되지 않았습니다. 잠시 후 다시 시도해주세요.");
+      if (!auth || !db || !firebaseAppId) { // firebaseAppId도 유효성 검사 추가
+        console.error("Firebase 인스턴스가 유효하지 않거나 앱 ID를 가져올 수 없습니다. auth:", auth, "db:", db, "appId:", firebaseAppId);
+        setError("Firebase가 초기화되지 않았거나 앱 ID를 찾을 수 없습니다. 잠시 후 다시 시도해주세요.");
         setLoading(false);
         return;
       }
@@ -60,7 +65,8 @@ export default function ChatPage() {
             setCurrentUser(user);
             const userId = user.uid;
 
-            const conversationsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/conversations`);
+            // `appId` 대신 `firebaseAppId` 사용
+            const conversationsCollectionRef = collection(db, `artifacts/${firebaseAppId}/users/${userId}/conversations`);
             const q = query(conversationsCollectionRef, orderBy("created_at", "asc"));
 
             const unsubscribeFirestore = onSnapshot(q, (snapshot) => {
@@ -91,14 +97,10 @@ export default function ChatPage() {
           } else {
             console.log("No user, attempting anonymous sign-in.");
             try {
-              if (initialAuthToken) {
-                await signInWithCustomToken(auth, initialAuthToken);
-                console.log("Signed in with custom token.");
-              } else {
-                await signInAnonymously(auth);
-                console.log("Signed in anonymously.");
-              }
-            } catch (authError: unknown) { // <-- 'any' 대신 'unknown'으로 변경
+              // __initial_auth_token 관련 로직 제거, 익명 로그인만 시도
+              await signInAnonymously(auth);
+              console.log("Signed in anonymously.");
+            } catch (authError: unknown) { 
               console.error("Firebase 인증 오류:", authError);
               setError(`인증 오류: ${authError instanceof Error ? authError.message : String(authError)}. Firebase 설정을 확인하세요.`);
               setLoading(false);
@@ -108,7 +110,7 @@ export default function ChatPage() {
 
         return () => unsubscribeAuth();
 
-      } catch (err: unknown) { // <-- 'any' 대신 'unknown'으로 변경
+      } catch (err: unknown) {
         console.error("앱 초기 설정 오류:", err);
         setError(`앱 초기화 중 오류 발생: ${err instanceof Error ? err.message : String(err)}`);
         setLoading(false);
@@ -116,7 +118,7 @@ export default function ChatPage() {
     };
 
     setupAuthAndFirestore();
-  }, [appId, initialAuthToken]);
+  }, [firebaseAppId]); // 의존성 배열도 `firebaseAppId`로 변경
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -168,7 +170,19 @@ export default function ChatPage() {
       const aiResponse = data.aiResponse;
       console.log("AI Response received from API Route:", aiResponse);
 
-    } catch (err: unknown) { // <-- 'any' 대신 'unknown'으로 변경
+      const userId = currentUser.uid;
+      // `appId` 대신 `firebaseAppId` 사용
+      const conversationsCollectionRef = collection(db, `artifacts/${firebaseAppId}/users/${userId}/conversations`);
+
+      await addDoc(conversationsCollectionRef, {
+        user_id: userId,
+        user_message: userMessage,
+        ai_response: aiResponse,
+        created_at: serverTimestamp(),
+      });
+      console.log("Message saved to Firestore.");
+
+    } catch (err: unknown) {
       console.error("메시지 전송 오류:", err);
       setError(`메시지 전송 중 오류 발생: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
