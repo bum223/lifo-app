@@ -2,20 +2,36 @@
 import OpenAI from 'openai';
 import { NextResponse } from 'next/server';
 import { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
-// Firebase Admin SDK 임포트 및 초기화 (서버에서만 실행되므로 안전)
 import admin from 'firebase-admin';
-import { getApp } from 'firebase-admin/app'; // getApp 추가
-import { getFirestore } from 'firebase-admin/firestore'; // getFirestore 추가
+import { getFirestore } from 'firebase-admin/firestore'; 
 
-// Firebase Admin SDK 초기화 (단 한 번만 실행되도록)
-// Vercel 환경에서 서비스 계정 키를 환경 변수로 설정합니다.
-// NEXT_PUBLIC_ 접두사 없음: 이 값은 서버에서만 사용됩니다.
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}')),
-  });
+// Firebase Admin SDK 초기화 (서버리스 환경에서 가장 안정적인 패턴)
+function getFirebaseAdminApp(): admin.app.App {
+  // `admin.apps.length` 대신 `admin.app.getApps().length`를 사용하는 것이 더 정확합니다.
+  if (admin.app.getApps().length === 0) { // getApps()로 현재 초기화된 앱 개수 확인
+    const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+
+    if (!serviceAccountKey) {
+      console.error("FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set. Admin SDK cannot be initialized.");
+      // 환경 변수가 없으면 초기화 시도 자체를 막고 오류 발생
+      throw new Error("Server configuration error: Firebase Service Account Key is missing.");
+    }
+    try {
+        const parsedCredential = JSON.parse(serviceAccountKey);
+        return admin.initializeApp({
+            credential: admin.credential.cert(parsedCredential),
+        });
+    } catch (parseError) {
+        console.error(`Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY: ${parseError}`);
+        throw new Error(`Server configuration error: Invalid Firebase Service Account Key format.`);
+    }
+  } else {
+    return admin.app(); 
+  }
 }
-const dbAdmin = getFirestore(getApp()); // Admin SDK용 Firestore 인스턴스
+
+const adminApp = getFirebaseAdminApp();
+const dbAdmin = getFirestore(adminApp);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY, 
@@ -27,10 +43,10 @@ export async function POST(request: Request) {
       currentMessage, 
       previousConversations, 
       promptType, 
-      userId // <-- userId를 클라이언트에서 전달받도록 변경 (보안 유의)
+      userId 
     } = await request.json();
 
-    if (!userId) { // userId 유효성 검사 추가
+    if (!userId) {
       return NextResponse.json({ error: "User ID is missing" }, { status: 400 });
     }
 
@@ -45,19 +61,35 @@ export async function POST(request: Request) {
     // ----------------------------------------------------
     // 사용자 개인 프로필 불러오기
     // ----------------------------------------------------
-    let userProfile = null;
+    // Firestore 문서 데이터 타입을 정확히 정의하여 타입 안정성 확보
+    interface UserProfileData {
+      frequent_emotions?: string[];
+      frequent_values?: string[];
+      last_summary?: string;
+      last_updated?: admin.firestore.FieldValue; // Timestamp 타입도 가능
+      [key: string]: any; // 향후 필드 추가에 대비
+    }
+    let userProfile: UserProfileData | null = null;
+
     try {
-        const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile'); // Firestore 경로에 app ID 포함
-        const doc = await userProfileRef.get();
-        if (doc.exists) {
-            userProfile = doc.data();
-            console.log("User profile loaded:", userProfile);
-        } else {
-            console.log("No existing user profile found.");
+        const firebaseAppId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID;
+        if (!firebaseAppId) {
+            console.error("NEXT_PUBLIC_FIREBASE_APP_ID is not set in environment variables. User profile features will be limited."); 
         }
-    } catch (profileError) {
-        console.error("Failed to load user profile:", profileError);
-        // 프로필 로딩 실패는 치명적이지 않으므로 앱을 중단하지 않습니다.
+
+        if (firebaseAppId) {
+            const userProfileRef = dbAdmin.collection(`artifacts/${firebaseAppId}/users/${userId}`).doc('profile');
+            const doc = await userProfileRef.get();
+            if (doc.exists) {
+                // 데이터가 존재하면 안전하게 UserProfileData 타입으로 단언
+                userProfile = doc.data() as UserProfileData; 
+                console.log("User profile loaded:", userProfile);
+            } else {
+                console.log("No existing user profile found for userId:", userId);
+            }
+        }
+    } catch (profileError: unknown) { 
+        console.error("Failed to load user profile:", profileError instanceof Error ? profileError.message : String(profileError));
     }
 
 
@@ -72,15 +104,15 @@ export async function POST(request: Request) {
 
         `;
         
-        // 개인화된 정보 추가
-        if (userProfile && userProfile.frequent_emotions && userProfile.frequent_emotions.length > 0) {
+        // 개인화된 정보 추가 시, 데이터의 존재 여부 및 타입 확인 강화
+        if (userProfile && userProfile.frequent_emotions && Array.isArray(userProfile.frequent_emotions) && userProfile.frequent_emotions.length > 0) {
             systemMessageContent += `
             **[사용자 개인 맞춤 정보]:**
             사용자는 과거 대화에서 주로 다음과 같은 감정들을 표현했습니다: ${userProfile.frequent_emotions.join(', ')}.
             이 정보를 바탕으로 사용자의 감정 상태와 가치관을 더 깊이 이해하고 대화에 반영해주세요.
             `;
         }
-        if (userProfile && userProfile.last_summary) {
+        if (userProfile && userProfile.last_summary && typeof userProfile.last_summary === 'string') {
             systemMessageContent += `
             최근의 자기서사 요약: ${userProfile.last_summary}.
             `;
@@ -150,83 +182,89 @@ export async function POST(request: Request) {
       throw new Error("OpenAI로부터 유효한 응답을 받지 못했습니다.");
     }
 
-    // -----------------------------------------------------------------------------------
-    // AI가 요약 제안을 답변에 포함하는 로직은 이제 프롬프트가 아닌 백엔드 코드에서 직접 처리합니다.
-    // -----------------------------------------------------------------------------------
     let finalAiResponse = aiResponse;
     if (promptType === 'interview' && conversationTurnCount >= suggestSummaryThreshold) {
       finalAiResponse += "\n\n(참고: 혹시 지금 나눈 이야기들을 제가 한번 정리해 드릴까요? 필요하시면 아래 '오늘의 자기서사 요약하기' 버튼을 눌러주세요.)";
     }
 
-    // -----------------------------------------------------------------------------------
-    // 감정/가치 키워드 추출 및 프로필 업데이트 로직 추가 (interview 모드일 때만)
-    // -----------------------------------------------------------------------------------
     if (promptType === 'interview' && userId) {
         try {
-            // 별도의 AI 요청을 통해 감정 키워드 추출
-            const emotionExtractionPrompt: ChatCompletionMessageParam[] = [
-                {
-                    role: 'system',
-                    content: `다음 대화 내용에서 사용자의 핵심 감정 키워드(최대 3개, 명사형)와 연관된 핵심 가치(최대 2개, 명사형)를 추출하고, 오늘 대화의 전체적인 톤을 긍정/부정/중립 중 하나로 분류하여 JSON 형식으로만 응답해주세요. 감정이나 가치가 명확하지 않으면 빈 배열로 두세요.
-                    예시: {"emotions": ["스트레스", "피로"], "values": ["완벽함"], "tone": "부정"}
-                    `
-                },
-                ...previousConversations.flatMap((conv: { user_message: string; ai_response: string; }) => [
-                    { role: 'user', content: conv.user_message },
-                    { role: 'assistant', content: conv.ai_response }
-                ]),
-                { role: 'user', content: `사용자의 마지막 메시지: "${currentMessage}" AI의 마지막 응답: "${finalAiResponse}"\n이 대화에서 감정과 가치를 추출해주세요.` }
-            ];
-
-            const emotionCompletion = await openai.chat.completions.create({
-                model: "gpt-3.5-turbo", // 감정 추출은 가벼운 모델 사용 가능
-                messages: emotionExtractionPrompt,
-                temperature: 0.2, // 창의성 낮춰서 정확도 높임
-                max_tokens: 150,
-                response_format: { type: "json_object" } // JSON 형식 응답 요청
-            });
-
-            const emotionDataString = emotionCompletion.choices[0].message?.content;
-            if (emotionDataString) {
-                try {
-                    const parsedEmotionData = JSON.parse(emotionDataString);
-                    const { emotions = [], values = [], tone = '중립' } = parsedEmotionData;
-
-                    // Firestore 사용자 프로필 업데이트
-                    const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile');
-                    await userProfileRef.set({
-                        frequent_emotions: admin.firestore.FieldValue.arrayUnion(...emotions), // 기존 배열에 추가 (중복 허용)
-                        frequent_values: admin.firestore.FieldValue.arrayUnion(...values),
-                        last_updated: admin.firestore.FieldValue.serverTimestamp(),
-                        // 필요에 따라 tone이나 다른 통계 데이터도 업데이트 가능
-                    }, { merge: true }); // 기존 필드는 유지하고 새 필드만 추가/업데이트
-
-                    console.log("User profile updated with emotions and values:", { emotions, values, tone });
-
-                } catch (jsonError) {
-                    console.error("Failed to parse emotion data JSON:", jsonError);
-                }
+            const firebaseAppId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID;
+            if (!firebaseAppId) {
+                console.error("NEXT_PUBLIC_FIREBASE_APP_ID is not set in environment variables for emotion extraction. Skipping profile update."); 
             }
-        } catch (emotionExtractionError) {
-            console.error("Failed to extract emotions or update profile:", emotionExtractionError);
+
+            if (firebaseAppId) { 
+                const emotionExtractionPrompt: ChatCompletionMessageParam[] = [
+                    {
+                        role: 'system',
+                        content: `다음 대화 내용에서 사용자의 핵심 감정 키워드(최대 3개, 명사형)와 연관된 핵심 가치(최대 2개, 명사형)를 추출하고, 오늘 대화의 전체적인 톤을 긍정/부정/중립 중 하나로 분류하여 JSON 형식으로만 응답해주세요. 감정이나 가치가 명확하지 않으면 빈 배열로 두세요.
+                        예시: {"emotions": ["스트레스", "피로"], "values": ["완벽함"], "tone": "부정"}
+                        `
+                    },
+                    ...previousConversations.flatMap((conv: { user_message: string; ai_response: string; }) => [
+                        { role: 'user', content: conv.user_message },
+                        { role: 'assistant', content: conv.ai_response }
+                    ]),
+                    { role: 'user', content: `사용자의 마지막 메시지: "${currentMessage}" AI의 마지막 응답: "${finalAiResponse}"\n이 대화에서 감정과 가치를 추출해주세요.` }
+                ];
+
+                const emotionCompletion = await openai.chat.completions.create({
+                    model: "gpt-3.5-turbo",
+                    messages: emotionExtractionPrompt,
+                    temperature: 0.2,
+                    max_tokens: 150,
+                    response_format: { type: "json_object" }
+                });
+
+                const emotionDataString = emotionCompletion.choices[0].message?.content;
+                if (emotionDataString) {
+                    try {
+                        const parsedEmotionData: { emotions?: string[], values?: string[], tone?: string } = JSON.parse(emotionDataString);
+                        // Array.isArray로 배열 여부를 확인하고, map(String)으로 요소의 타입을 확실히 합니다.
+                        const emotions: string[] = Array.isArray(parsedEmotionData.emotions) ? parsedEmotionData.emotions.map(String) : [];
+                        const values: string[] = Array.isArray(parsedEmotionData.values) ? parsedEmotionData.values.map(String) : [];
+                        const tone: string = typeof parsedEmotionData.tone === 'string' ? parsedEmotionData.tone : '중립';
+
+
+                        const userProfileRef = dbAdmin.collection(`artifacts/${firebaseAppId}/users/${userId}`).doc('profile');
+                        await userProfileRef.set({
+                            frequent_emotions: admin.firestore.FieldValue.arrayUnion(...emotions),
+                            frequent_values: admin.firestore.FieldValue.arrayUnion(...values),
+                            last_updated: admin.firestore.FieldValue.serverTimestamp(),
+                            tone_data: admin.firestore.FieldValue.arrayUnion(tone), // 예시: 톤 데이터도 누적할 경우
+                        }, { merge: true });
+                        console.log("User profile updated with emotions and values:", { emotions, values, tone });
+
+                    } catch (jsonError: unknown) { // jsonError도 unknown으로 처리
+                        console.error("Failed to parse emotion data JSON or update profile:", jsonError instanceof Error ? jsonError.message : String(jsonError)); 
+                    }
+                }
+            } else {
+                console.warn("Skipping emotion extraction and profile update: Firebase App ID is not available.");
+            }
+        } catch (emotionExtractionError: unknown) { // emotionExtractionError도 unknown으로 처리
+            console.error("Failed to extract emotions or update profile (OpenAI API call or Firestore issue):", emotionExtractionError instanceof Error ? emotionExtractionError.message : String(emotionExtractionError)); 
         }
     }
-    // -----------------------------------------------------------------------------------
-    // 자기서사 요약 모드일 때 마지막 요약 저장
+
     if (promptType === 'summary' && userId && finalAiResponse) {
         try {
-            const userProfileRef = dbAdmin.collection(`artifacts/${process.env.NEXT_PUBLIC_FIREBASE_APP_ID}/users/${userId}`).doc('profile');
-            await userProfileRef.set({
-                last_summary: finalAiResponse,
-                last_updated: admin.firestore.FieldValue.serverTimestamp(),
-            }, { merge: true });
-            console.log("User profile updated with last summary.");
-        } catch (summarySaveError) {
-            console.error("Failed to save last summary to profile:", summarySaveError);
+            const firebaseAppId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID; 
+            if (firebaseAppId) {
+                const userProfileRef = dbAdmin.collection(`artifacts/${firebaseAppId}/users/${userId}`).doc('profile');
+                await userProfileRef.set({
+                    last_summary: finalAiResponse,
+                    last_updated: admin.firestore.FieldValue.serverTimestamp(),
+                }, { merge: true });
+                console.log("User profile updated with last summary.");
+            } else {
+                 console.warn("Skipping summary save: Firebase App ID is not available.");
+            }
+        } catch (summarySaveError: unknown) { // summarySaveError도 unknown으로 처리
+            console.error("Failed to save last summary to profile:", summarySaveError instanceof Error ? summarySaveError.message : String(summarySaveError));
         }
     }
-    // -----------------------------------------------------------------------------------
-
 
     return NextResponse.json({ aiResponse: finalAiResponse });
 
