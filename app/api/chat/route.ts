@@ -7,13 +7,11 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 // Firebase Admin SDK 초기화 (서버리스 환경에서 가장 안정적인 패턴)
 function getFirebaseAdminApp(): admin.app.App {
-  // `admin.apps.length` 대신 `admin.app.getApps().length`를 사용하는 것이 더 정확합니다.
-  if (admin.app.getApps().length === 0) { // getApps()로 현재 초기화된 앱 개수 확인
+  if (admin.app.getApps().length === 0) {
     const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
 
     if (!serviceAccountKey) {
       console.error("FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set. Admin SDK cannot be initialized.");
-      // 환경 변수가 없으면 초기화 시도 자체를 막고 오류 발생
       throw new Error("Server configuration error: Firebase Service Account Key is missing.");
     }
     try {
@@ -61,15 +59,16 @@ export async function POST(request: Request) {
     // ----------------------------------------------------
     // 사용자 개인 프로필 불러오기
     // ----------------------------------------------------
-    // Firestore 문서 데이터 타입을 정확히 정의하여 타입 안정성 확보
     interface UserProfileData {
       frequent_emotions?: string[];
       frequent_values?: string[];
       last_summary?: string;
-      last_updated?: admin.firestore.FieldValue; // Timestamp 타입도 가능
-      [key: string]: any; // 향후 필드 추가에 대비
+      last_updated?: admin.firestore.FieldValue;
+      // [key: string]: any; // <-- 이 부분을 제거하거나 더 구체적인 타입으로 대체합니다.
+                          // 현재 이 필드가 `any` 오류를 유발할 수 있습니다.
     }
-    let userProfile: UserProfileData | null = null;
+    // userProfile 변수 초기화를 더 명확히 합니다.
+    let userProfile: UserProfileData | undefined = undefined; // null 대신 undefined 사용 (optional chaining에 유리)
 
     try {
         const firebaseAppId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID;
@@ -77,18 +76,26 @@ export async function POST(request: Request) {
             console.error("NEXT_PUBLIC_FIREBASE_APP_ID is not set in environment variables. User profile features will be limited."); 
         }
 
-        if (firebaseAppId) {
+        if (firebaseAppId) { 
             const userProfileRef = dbAdmin.collection(`artifacts/${firebaseAppId}/users/${userId}`).doc('profile');
             const doc = await userProfileRef.get();
             if (doc.exists) {
-                // 데이터가 존재하면 안전하게 UserProfileData 타입으로 단언
-                userProfile = doc.data() as UserProfileData; 
+                // doc.data()는 DocumentData를 반환. 이를 명시적으로 UserProfileData로 검증/단언
+                const data = doc.data();
+                // 데이터 필드를 명시적으로 UserProfileData에 맞게 매핑 또는 검증
+                userProfile = {
+                    frequent_emotions: Array.isArray(data?.frequent_emotions) ? data.frequent_emotions.map(String) : undefined,
+                    frequent_values: Array.isArray(data?.frequent_values) ? data.frequent_values.map(String) : undefined,
+                    last_summary: typeof data?.last_summary === 'string' ? data.last_summary : undefined,
+                    last_updated: data?.last_updated, // Firebase Timestamp 타입 등 확인 필요
+                    // 추가적인 필드가 있다면 여기에 명시
+                };
                 console.log("User profile loaded:", userProfile);
             } else {
                 console.log("No existing user profile found for userId:", userId);
             }
         }
-    } catch (profileError: unknown) { 
+    } catch (profileError: unknown) { // 이 부분은 unknown으로 이미 잘 처리되어 있습니다.
         console.error("Failed to load user profile:", profileError instanceof Error ? profileError.message : String(profileError));
     }
 
@@ -104,15 +111,15 @@ export async function POST(request: Request) {
 
         `;
         
-        // 개인화된 정보 추가 시, 데이터의 존재 여부 및 타입 확인 강화
-        if (userProfile && userProfile.frequent_emotions && Array.isArray(userProfile.frequent_emotions) && userProfile.frequent_emotions.length > 0) {
+        // userProfile이 null이 아닌 undefined일 수 있으므로 옵셔널 체이닝 강화
+        if (userProfile?.frequent_emotions && Array.isArray(userProfile.frequent_emotions) && userProfile.frequent_emotions.length > 0) {
             systemMessageContent += `
             **[사용자 개인 맞춤 정보]:**
             사용자는 과거 대화에서 주로 다음과 같은 감정들을 표현했습니다: ${userProfile.frequent_emotions.join(', ')}.
             이 정보를 바탕으로 사용자의 감정 상태와 가치관을 더 깊이 이해하고 대화에 반영해주세요.
             `;
         }
-        if (userProfile && userProfile.last_summary && typeof userProfile.last_summary === 'string') {
+        if (userProfile?.last_summary && typeof userProfile.last_summary === 'string') {
             systemMessageContent += `
             최근의 자기서사 요약: ${userProfile.last_summary}.
             `;
@@ -221,7 +228,6 @@ export async function POST(request: Request) {
                 if (emotionDataString) {
                     try {
                         const parsedEmotionData: { emotions?: string[], values?: string[], tone?: string } = JSON.parse(emotionDataString);
-                        // Array.isArray로 배열 여부를 확인하고, map(String)으로 요소의 타입을 확실히 합니다.
                         const emotions: string[] = Array.isArray(parsedEmotionData.emotions) ? parsedEmotionData.emotions.map(String) : [];
                         const values: string[] = Array.isArray(parsedEmotionData.values) ? parsedEmotionData.values.map(String) : [];
                         const tone: string = typeof parsedEmotionData.tone === 'string' ? parsedEmotionData.tone : '중립';
@@ -232,18 +238,18 @@ export async function POST(request: Request) {
                             frequent_emotions: admin.firestore.FieldValue.arrayUnion(...emotions),
                             frequent_values: admin.firestore.FieldValue.arrayUnion(...values),
                             last_updated: admin.firestore.FieldValue.serverTimestamp(),
-                            tone_data: admin.firestore.FieldValue.arrayUnion(tone), // 예시: 톤 데이터도 누적할 경우
+                            tone_data: admin.firestore.FieldValue.arrayUnion(tone), 
                         }, { merge: true });
                         console.log("User profile updated with emotions and values:", { emotions, values, tone });
 
-                    } catch (jsonError: unknown) { // jsonError도 unknown으로 처리
+                    } catch (jsonError: unknown) { 
                         console.error("Failed to parse emotion data JSON or update profile:", jsonError instanceof Error ? jsonError.message : String(jsonError)); 
                     }
                 }
             } else {
                 console.warn("Skipping emotion extraction and profile update: Firebase App ID is not available.");
             }
-        } catch (emotionExtractionError: unknown) { // emotionExtractionError도 unknown으로 처리
+        } catch (emotionExtractionError: unknown) { 
             console.error("Failed to extract emotions or update profile (OpenAI API call or Firestore issue):", emotionExtractionError instanceof Error ? emotionExtractionError.message : String(emotionExtractionError)); 
         }
     }
@@ -261,7 +267,7 @@ export async function POST(request: Request) {
             } else {
                  console.warn("Skipping summary save: Firebase App ID is not available.");
             }
-        } catch (summarySaveError: unknown) { // summarySaveError도 unknown으로 처리
+        } catch (summarySaveError: unknown) { 
             console.error("Failed to save last summary to profile:", summarySaveError instanceof Error ? summarySaveError.message : String(summarySaveError));
         }
     }
