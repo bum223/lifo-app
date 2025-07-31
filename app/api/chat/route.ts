@@ -180,7 +180,7 @@ export async function POST(request: Request) {
       model: "gpt-3.5-turbo",
       messages: messagesToSend,
       temperature: 0.8,
-      max_tokens: promptType === 'summary' ? 100 : 800,
+      max_tokens: promptType === 'summary' ? 300 : 800,
       top_p: 1,
       frequency_penalty: 0,
       presence_penalty: 0,
