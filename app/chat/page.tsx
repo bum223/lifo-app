@@ -2,8 +2,6 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-// askLifo 임포트 제거: 이제 직접 호출하지 않고 API Route를 통해 호출
-// import { askLifo } from "@/lib/openai"; 
 import { auth, db } from "@/lib/firebase";
 import { 
   collection, 
@@ -100,9 +98,9 @@ export default function ChatPage() {
                 await signInAnonymously(auth);
                 console.log("Signed in anonymously.");
               }
-            } catch (authError: any) {
+            } catch (authError: unknown) { // <-- 'any' 대신 'unknown'으로 변경
               console.error("Firebase 인증 오류:", authError);
-              setError(`인증 오류: ${authError.message}. Firebase 설정을 확인하세요.`);
+              setError(`인증 오류: ${authError instanceof Error ? authError.message : String(authError)}. Firebase 설정을 확인하세요.`);
               setLoading(false);
             }
           }
@@ -110,9 +108,9 @@ export default function ChatPage() {
 
         return () => unsubscribeAuth();
 
-      } catch (err: any) {
-        console.error("앱 초기 설정 오류:", err.message);
-        setError(`앱 초기화 중 오류 발생: ${err.message}`);
+      } catch (err: unknown) { // <-- 'any' 대신 'unknown'으로 변경
+        console.error("앱 초기 설정 오류:", err);
+        setError(`앱 초기화 중 오류 발생: ${err instanceof Error ? err.message : String(err)}`);
         setLoading(false);
       }
     };
@@ -145,15 +143,11 @@ export default function ChatPage() {
     try {
       console.log("Sending message to AI and Firestore...");
 
-      // 1. AI에게 전달할 이전 대화 기록 준비
-      // Firestore 'Conversation' 타입에서 OpenAI API Route가 필요한 'user_message'와 'ai_response'만 추출합니다.
       const previousMessagesForAI = conversations.map(c => ({
         user_message: c.user_message,
         ai_response: c.ai_response
       }));
 
-      // 2. /api/chat API Route를 호출하여 AI 응답 받기
-      // 클라이언트에서 직접 OpenAI API를 호출하는 대신, 서버 측 API Route를 호출합니다.
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -174,21 +168,9 @@ export default function ChatPage() {
       const aiResponse = data.aiResponse;
       console.log("AI Response received from API Route:", aiResponse);
 
-      // 3. 사용자 메시지와 AI 응답을 Firestore에 저장합니다.
-      const userId = currentUser.uid;
-      const conversationsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/conversations`);
-
-      await addDoc(conversationsCollectionRef, {
-        user_id: userId,
-        user_message: userMessage,
-        ai_response: aiResponse,
-        created_at: serverTimestamp(),
-      });
-      console.log("Message saved to Firestore.");
-
-    } catch (err: any) {
-      console.error("메시지 전송 오류:", err.message);
-      setError(`메시지 전송 중 오류 발생: ${err.message}`);
+    } catch (err: unknown) { // <-- 'any' 대신 'unknown'으로 변경
+      console.error("메시지 전송 오류:", err);
+      setError(`메시지 전송 중 오류 발생: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setLoading(false);
     }
