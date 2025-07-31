@@ -7,7 +7,9 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 // Firebase Admin SDK 초기화 (서버리스 환경에서 가장 안정적인 패턴)
 function getFirebaseAdminApp(): admin.app.App {
-  if (admin.app.getApps().length === 0) {
+  // admin.app.getApps().length 대신 admin.apps.length를 사용합니다.
+  // admin.apps는 이미 초기화된 Firebase 앱 인스턴스 배열입니다.
+  if (admin.apps.length === 0) { // <-- 이 부분을 수정합니다.
     const serviceAccountKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
 
     if (!serviceAccountKey) {
@@ -24,6 +26,7 @@ function getFirebaseAdminApp(): admin.app.App {
         throw new Error(`Server configuration error: Invalid Firebase Service Account Key format.`);
     }
   } else {
+    // 이미 초기화된 앱이 있다면, 기본 앱 인스턴스를 가져와 재사용합니다.
     return admin.app(); 
   }
 }
